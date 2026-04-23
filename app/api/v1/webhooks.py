@@ -72,15 +72,23 @@ async def retell_webhook(
     recording_url = data.get("recording_url") or data.get("audio_url")
     duration_ms = data.get("duration_ms") or data.get("call_length_ms") or 0
     duration_sec = int(duration_ms / 1000) if duration_ms else data.get("duration_sec")
-    cost = data.get("call_cost", {}).get("combined_cost") if isinstance(data.get("call_cost"), dict) else data.get("cost")
+    # Retell returns combined_cost in CENTS. Convert to dollars at ingestion
+    # so cost_usd is dollars everywhere downstream.
+    cost_cents = (
+        data.get("call_cost", {}).get("combined_cost")
+        if isinstance(data.get("call_cost"), dict)
+        else data.get("cost")
+    )
     disconnect_reason = data.get("disconnection_reason") or data.get("end_reason")
 
     call.transcript = transcript
     call.recording_url = recording_url
     call.duration_sec = duration_sec
-    if cost is not None:
+    if cost_cents is not None:
         try:
-            call.cost_usd = Decimal(str(cost))
+            call.cost_usd = (Decimal(str(cost_cents)) / Decimal("100")).quantize(
+                Decimal("0.0001")
+            )
         except Exception:
             pass
     call.completed_at = datetime.now(timezone.utc)
