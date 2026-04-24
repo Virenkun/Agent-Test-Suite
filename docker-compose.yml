@@ -42,3 +42,17 @@ services:
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO --concurrency=4
     volumes:
       - ./app:/app/app
+
+  beat:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+    volumes:
+      - ./app:/app/app

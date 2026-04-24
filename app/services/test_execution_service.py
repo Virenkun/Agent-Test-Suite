@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.core.exceptions import NotFoundError, ValidationError
+from app.models.agent import Agent
 from app.models.call import Call, CallStatus
 from app.models.call_evaluation import CallEvaluation
 from app.models.criterion import CriterionType
@@ -30,6 +31,24 @@ class TestExecutionService:
         max_cost = payload.max_cost_usd or Decimal(str(settings.max_cost_per_run_usd))
         max_duration = payload.max_duration_sec or settings.max_call_duration_sec
 
+        # Resolve agent phone: prefer explicit phone, otherwise look up via agent_id.
+        resolved_agent_id = payload.agent_id
+        resolved_phone = payload.agent_phone_number
+        if not resolved_phone:
+            if resolved_agent_id is None:
+                raise ValidationError(
+                    "Either agent_phone_number or agent_id must be provided"
+                )
+            agent_row = await self.db.execute(
+                select(Agent).where(
+                    Agent.id == resolved_agent_id, Agent.deleted_at.is_(None)
+                )
+            )
+            agent = agent_row.scalar_one_or_none()
+            if agent is None:
+                raise NotFoundError(f"Agent {resolved_agent_id} not found")
+            resolved_phone = agent.phone_number
+
         tc = await self.db.execute(
             select(TestCase)
             .options(selectinload(TestCase.criteria))
@@ -43,7 +62,8 @@ class TestExecutionService:
 
         run = TestRun(
             test_case_id=test_case.id,
-            agent_phone_number=payload.agent_phone_number,
+            agent_phone_number=resolved_phone,
+            agent_id=resolved_agent_id,
             requested_calls=payload.num_calls,
             max_cost_usd=max_cost,
             max_duration_sec=max_duration,

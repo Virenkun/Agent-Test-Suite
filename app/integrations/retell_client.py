@@ -76,6 +76,16 @@ class RetellClient:
             raise ExternalServiceError("Retell response missing call_id")
         return PlacedCall(retell_call_id=str(call_id), raw=raw)
 
+    def get_call(self, retell_call_id: str) -> dict[str, Any]:
+        """Fetch current state of a call from Retell."""
+        try:
+            call = self._client.call.retrieve(retell_call_id)
+        except Exception as e:
+            log.error("retell_get_call_failed", error=str(e), call_id=retell_call_id)
+            raise ExternalServiceError(f"Retell API error: {e}") from e
+        raw = call.model_dump() if hasattr(call, "model_dump") else dict(call)
+        return raw
+
     def verify_webhook_signature(self, *, payload: bytes, signature: str) -> bool:
         """Verify a Retell webhook signature.
 

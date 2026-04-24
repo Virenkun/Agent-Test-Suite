@@ -13,14 +13,17 @@ _E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
 class TestRunCreate(BaseModel):
     test_case_id: UUID
-    agent_phone_number: str = Field(..., min_length=4, max_length=32)
+    agent_phone_number: str | None = Field(default=None, min_length=4, max_length=32)
+    agent_id: UUID | None = None
     num_calls: int = Field(..., ge=1)
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
     max_duration_sec: int | None = Field(default=None, ge=10)
 
     @field_validator("agent_phone_number")
     @classmethod
-    def _validate_e164(cls, v: str) -> str:
+    def _validate_e164(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         v = v.strip()
         if not _E164_RE.match(v):
             raise ValueError(
@@ -42,6 +45,8 @@ class TestRunRead(BaseModel):
 
     id: UUID
     test_case_id: UUID
+    test_suite_run_id: UUID | None = None
+    agent_id: UUID | None = None
     status: TestRunStatus
     agent_phone_number: str
     requested_calls: int
@@ -57,6 +62,13 @@ class TestRunRead(BaseModel):
     created_at: datetime
 
 
+class RunInsights(BaseModel):
+    top_issues: list[dict] = []
+    suggestions: list[str] = []
+    generated_at: str | None = None
+
+
 class TestRunDetailRead(TestRunRead):
     calls: list[CallRead] = []
     criteria_breakdown: list[CriterionBreakdown] = []
+    insights: RunInsights | None = None

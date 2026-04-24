@@ -174,3 +174,97 @@ def aggregate_run_if_complete(test_run_id: str) -> None:
             "total_cost_usd": str(run.total_cost_usd),
         },
     )
+
+    # Phase 3: generate LLM failure insights asynchronously.
+    try:
+        from app.workers.tasks_insights import generate_insights
+
+        generate_insights.delay(test_run_id)
+    except Exception as e:
+        log.warning("enqueue_insights_failed", error=str(e))
+
+    # Phase 3: if this run is part of a suite run, check if the parent is done.
+    if run.test_suite_run_id is not None:
+        maybe_finalize_suite_run.delay(str(run.test_suite_run_id))
+
+
+@shared_task(name="app.workers.tasks_eval.maybe_finalize_suite_run")
+def maybe_finalize_suite_run(suite_run_id: str) -> None:
+    """If every child TestRun is terminal, compute parent aggregates."""
+    from app.models.test_suite import TestSuiteRun
+    from app.services.run_events import publish_run_event as _pub
+
+    with sync_session() as session:
+        suite_run = session.get(TestSuiteRun, UUID(suite_run_id))
+        if suite_run is None:
+            return
+        child_runs = list(
+            session.execute(
+                select(TestRun).where(TestRun.test_suite_run_id == suite_run.id)
+            ).scalars()
+        )
+        if not child_runs:
+            return
+        terminal_states = {
+            TestRunStatus.COMPLETED,
+            TestRunStatus.FAILED,
+            TestRunStatus.PARTIAL,
+        }
+        if any(r.status not in terminal_states for r in child_runs):
+            # Still running; emit an incremental update instead.
+            _pub(
+                suite_run.id,
+                "child_updated",
+                {
+                    "terminal": sum(
+                        1 for r in child_runs if r.status in terminal_states
+                    ),
+                    "total": len(child_runs),
+                },
+            )
+            return
+
+        scores = [r.aggregate_score for r in child_runs if r.aggregate_score is not None]
+        passing = [r for r in child_runs if r.pass_ is True]
+        avg = (
+            (sum(scores, Decimal("0")) / Decimal(len(scores))).quantize(
+                Decimal("0.0001")
+            )
+            if scores
+            else None
+        )
+        pass_rate = (
+            (Decimal(len(passing)) / Decimal(len(child_runs))).quantize(
+                Decimal("0.0001")
+            )
+            if child_runs
+            else Decimal("0")
+        )
+        total_cost = sum(
+            (r.total_cost_usd or Decimal("0") for r in child_runs),
+            start=Decimal("0"),
+        ).quantize(Decimal("0.0001"))
+
+        suite_run.average_aggregate_score = avg
+        suite_run.pass_rate = pass_rate
+        suite_run.total_cost_usd = total_cost
+        suite_run.completed_at = datetime.now(timezone.utc)
+        if all(r.status == TestRunStatus.COMPLETED for r in child_runs):
+            suite_run.status = TestRunStatus.COMPLETED
+            terminal = "suite_run_completed"
+        elif all(r.status == TestRunStatus.FAILED for r in child_runs):
+            suite_run.status = TestRunStatus.FAILED
+            terminal = "suite_run_failed"
+        else:
+            suite_run.status = TestRunStatus.PARTIAL
+            terminal = "suite_run_partial"
+
+    publish_run_event(
+        suite_run_id,
+        terminal,
+        {
+            "average_aggregate_score": str(avg) if avg is not None else None,
+            "pass_rate": str(pass_rate),
+            "total_cost_usd": str(total_cost),
+        },
+    )

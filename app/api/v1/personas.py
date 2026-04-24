@@ -1,11 +1,15 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import ValidationError as DomainValidationError
 from app.db.session import get_db
 from app.schemas.common import Page
+from app.schemas.import_result import ImportResult
 from app.schemas.persona import PersonaCreate, PersonaRead, PersonaUpdate
+from app.services.persona_import_service import PersonaImportService
 from app.services.persona_service import PersonaService
 
 router = APIRouter(prefix="/personas", tags=["personas"])
@@ -15,6 +19,36 @@ router = APIRouter(prefix="/personas", tags=["personas"])
 async def create_persona(payload: PersonaCreate, db: AsyncSession = Depends(get_db)) -> PersonaRead:
     persona = await PersonaService(db).create(payload)
     return PersonaRead.model_validate(persona)
+
+
+@router.get("/import-template.xlsx")
+async def download_import_template() -> Response:
+    content = PersonaImportService.build_template_xlsx()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="personas-template.xlsx"'
+        },
+    )
+
+
+@router.post(
+    "/bulk-import",
+    response_model=ImportResult,
+    status_code=status.HTTP_200_OK,
+)
+async def bulk_import_personas(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> ImportResult:
+    content = await file.read()
+    try:
+        return await PersonaImportService(db).import_file(
+            filename=file.filename or "upload", content=content
+        )
+    except ValueError as e:
+        raise DomainValidationError(str(e)) from e
 
 
 @router.get("", response_model=Page[PersonaRead])

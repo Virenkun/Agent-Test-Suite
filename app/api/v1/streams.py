@@ -18,7 +18,7 @@ from app.services.run_events import channel_for
 
 log = get_logger(__name__)
 
-router = APIRouter(prefix="/test-runs", tags=["streams"])
+router = APIRouter(tags=["streams"])
 
 _TERMINAL = {TestRunStatus.COMPLETED, TestRunStatus.FAILED, TestRunStatus.PARTIAL}
 _HEARTBEAT_SEC = 15
@@ -46,7 +46,7 @@ async def _run_snapshot(db: AsyncSession, run_id: UUID) -> dict:
     }
 
 
-@router.get("/{run_id}/stream")
+@router.get("/test-runs/{run_id}/stream")
 async def stream_test_run(
     run_id: UUID,
     request: Request,
@@ -101,6 +101,95 @@ async def stream_test_run(
         finally:
             try:
                 await pubsub.unsubscribe(channel_for(run_id))
+                await pubsub.close()
+                await client.aclose()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+async def _suite_run_snapshot(db: AsyncSession, suite_run_id: UUID) -> dict:
+    from app.models.test_suite import TestSuiteRun
+
+    result = await db.execute(
+        select(TestSuiteRun).where(TestSuiteRun.id == suite_run_id)
+    )
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise NotFoundError(f"TestSuiteRun {suite_run_id} not found")
+    return {
+        "id": str(run.id),
+        "status": run.status.value,
+        "average_aggregate_score": str(run.average_aggregate_score)
+        if run.average_aggregate_score is not None
+        else None,
+        "pass_rate": str(run.pass_rate) if run.pass_rate is not None else None,
+        "total_cost_usd": str(run.total_cost_usd),
+    }
+
+
+@router.get("/test-suite-runs/{suite_run_id}/stream")
+async def stream_test_suite_run(
+    suite_run_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """SSE for a test-suite-run: parent + child updates."""
+    snapshot = await _suite_run_snapshot(db, suite_run_id)
+
+    async def event_gen():
+        yield _sse(json.dumps(snapshot), event="snapshot")
+        if snapshot["status"] in {s.value for s in _TERMINAL}:
+            yield _sse(json.dumps({"reason": "already_terminal"}), event="end")
+            return
+        client = aioredis.from_url(
+            get_settings().redis_url, decode_responses=True
+        )
+        pubsub = client.pubsub()
+        await pubsub.subscribe(channel_for(suite_run_id))
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    message = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True),
+                        timeout=_HEARTBEAT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    yield _sse("{}", event="heartbeat")
+                    continue
+                if not message:
+                    continue
+                data = message.get("data")
+                if not isinstance(data, str):
+                    continue
+                yield _sse(data, event="update")
+                try:
+                    parsed = json.loads(data)
+                except Exception:
+                    parsed = {}
+                if parsed.get("event") in {
+                    "suite_run_completed",
+                    "suite_run_failed",
+                    "suite_run_partial",
+                }:
+                    final = await _suite_run_snapshot(db, suite_run_id)
+                    yield _sse(json.dumps(final), event="snapshot")
+                    yield _sse(json.dumps({"reason": "terminal"}), event="end")
+                    break
+        finally:
+            try:
+                await pubsub.unsubscribe(channel_for(suite_run_id))
                 await pubsub.close()
                 await client.aclose()
             except Exception:

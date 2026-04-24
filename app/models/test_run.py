@@ -3,7 +3,10 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
+from typing import Any
+
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -56,7 +59,24 @@ class TestRun(UUIDPKMixin, TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Phase 3 additions
+    test_suite_run_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("test_suite_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    agent_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    insights: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
     test_case: Mapped["TestCase"] = relationship(back_populates="test_runs")  # noqa: F821
     calls: Mapped[list["Call"]] = relationship(  # noqa: F821
         back_populates="test_run", cascade="all, delete-orphan"
+    )
+    test_suite_run = relationship(
+        "TestSuiteRun", back_populates="test_runs", lazy="joined"
     )

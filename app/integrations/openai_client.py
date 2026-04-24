@@ -125,3 +125,187 @@ class OpenAIEvaluator:
             confidence=float(parsed.get("confidence", 0.0)),
             cost_usd=cost,
         )
+
+    # ----------- AI drafting helpers -----------
+
+    def generate_persona(self, brief: str) -> dict:
+        """Return a dict matching PersonaCreate shape."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "tone": {"type": "string"},
+                "personality": {"type": "string"},
+                "goal": {"type": "string"},
+                "constraints": {
+                    "type": "object",
+                    "additionalProperties": {"type": ["string", "number", "boolean"]},
+                },
+                "prompt_instructions": {"type": "string"},
+            },
+            "required": [
+                "name",
+                "tone",
+                "personality",
+                "goal",
+                "constraints",
+                "prompt_instructions",
+            ],
+            "additionalProperties": False,
+        }
+        system = (
+            "You design realistic caller personas for testing AI voice agents. "
+            "Given a brief, return a persona JSON object. Keep names short and "
+            "human. Constraints are small factual knobs the caller carries "
+            "(e.g. patience_sec=60, injury_type='neck pain'). Prompt "
+            "instructions tell the simulator how to behave during the call."
+        )
+        try:
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": brief},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "persona",
+                        "schema": schema,
+                        "strict": True,
+                    },
+                },
+                temperature=0.8,
+            )
+        except Exception as e:
+            log.error("openai_generate_persona_failed", error=str(e))
+            raise ExternalServiceError(f"OpenAI API error: {e}") from e
+        return json.loads(resp.choices[0].message.content or "{}")
+
+    def generate_test_case(
+        self,
+        *,
+        brief: str,
+        persona_hint: str | None = None,
+        desired_criteria_count: int = 5,
+    ) -> dict:
+        """Return a dict matching TestCaseCreate shape (without persona_id)."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "description": {"type": "string"},
+                "context": {"type": "string"},
+                "criteria": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 10,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1},
+                            "type": {"enum": ["boolean", "score"]},
+                            "instructions": {"type": "string", "minLength": 1},
+                            "weight": {"type": "number", "minimum": 0},
+                            "max_score": {"type": ["integer", "null"], "minimum": 1},
+                        },
+                        "required": [
+                            "name",
+                            "type",
+                            "instructions",
+                            "weight",
+                            "max_score",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["name", "description", "context", "criteria"],
+            "additionalProperties": False,
+        }
+        system = (
+            "You design QA test cases for AI voice agents. Given a brief, "
+            "return a test case JSON with a concise name, description, context "
+            "for the agent under test, and roughly "
+            f"{desired_criteria_count} evaluation criteria. Mix boolean and score "
+            "criteria. For score criteria set max_score to 5. For boolean "
+            "criteria set max_score to null. Weights should be small positive "
+            "numbers summing to roughly 1."
+        )
+        user_msg = brief
+        if persona_hint:
+            user_msg = f"Persona: {persona_hint}\n\nBrief: {brief}"
+        try:
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "test_case",
+                        "schema": schema,
+                        "strict": True,
+                    },
+                },
+                temperature=0.7,
+            )
+        except Exception as e:
+            log.error("openai_generate_test_case_failed", error=str(e))
+            raise ExternalServiceError(f"OpenAI API error: {e}") from e
+        return json.loads(resp.choices[0].message.content or "{}")
+
+    def summarize_failures(self, *, payload: dict) -> dict:
+        """Given a compact summary of failed evaluations, produce insights."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "top_issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "criterion": {"type": "string"},
+                            "fail_rate": {"type": "number", "minimum": 0, "maximum": 1},
+                            "summary": {"type": "string"},
+                        },
+                        "required": ["criterion", "fail_rate", "summary"],
+                        "additionalProperties": False,
+                    },
+                },
+                "suggestions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["top_issues", "suggestions"],
+            "additionalProperties": False,
+        }
+        system = (
+            "You review voice-agent QA results and produce concise, actionable "
+            "improvement suggestions. Focus on the agent under test, not the "
+            "simulated caller. Be specific and prescriptive. 3-5 suggestions."
+        )
+        try:
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(payload)},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "insights",
+                        "schema": schema,
+                        "strict": True,
+                    },
+                },
+                temperature=0.5,
+            )
+        except Exception as e:
+            log.error("openai_summarize_failures_failed", error=str(e))
+            raise ExternalServiceError(f"OpenAI API error: {e}") from e
+        return json.loads(resp.choices[0].message.content or "{}")
