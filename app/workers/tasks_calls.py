@@ -20,6 +20,10 @@ log = get_logger(__name__)
 @shared_task(
     bind=True,
     name="app.workers.tasks_calls.place_call",
+    # Soft cap on outbound call dispatch to stay under Retell concurrency limit.
+    # Per-worker limit; with 16 workers this gives roughly ~16 calls/sec max burst,
+    # well under the 20 concurrent-call ceiling.
+    rate_limit="1/s",
     autoretry_for=(Exception,),
     retry_backoff=True,
     retry_backoff_max=300,
