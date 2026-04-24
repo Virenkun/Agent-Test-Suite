@@ -129,7 +129,12 @@ class OpenAIEvaluator:
     # ----------- AI drafting helpers -----------
 
     def generate_persona(self, brief: str) -> dict:
-        """Return a dict matching PersonaCreate shape."""
+        """Return a dict matching PersonaCreate shape.
+
+        OpenAI strict JSON schema disallows union types and open-ended
+        ``additionalProperties: {type: ...}``. We model constraints as an array
+        of ``{key, value}`` pairs and coerce it to a dict before returning.
+        """
         schema = {
             "type": "object",
             "properties": {
@@ -138,8 +143,16 @@ class OpenAIEvaluator:
                 "personality": {"type": "string"},
                 "goal": {"type": "string"},
                 "constraints": {
-                    "type": "object",
-                    "additionalProperties": {"type": ["string", "number", "boolean"]},
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"},
+                            "value": {"type": "string"},
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": False,
+                    },
                 },
                 "prompt_instructions": {"type": "string"},
             },
@@ -155,9 +168,10 @@ class OpenAIEvaluator:
         }
         system = (
             "You design realistic caller personas for testing AI voice agents. "
-            "Given a brief, return a persona JSON object. Keep names short and "
-            "human. Constraints are small factual knobs the caller carries "
-            "(e.g. patience_sec=60, injury_type='neck pain'). Prompt "
+            "Given a brief, return a persona JSON. Keep names short and human. "
+            "Constraints is an ARRAY of {key, value} string pairs — small "
+            "factual knobs the caller carries (e.g. key='patience_sec' "
+            "value='60', key='injury_type' value='neck pain'). Prompt "
             "instructions tell the simulator how to behave during the call."
         )
         try:
@@ -180,7 +194,15 @@ class OpenAIEvaluator:
         except Exception as e:
             log.error("openai_generate_persona_failed", error=str(e))
             raise ExternalServiceError(f"OpenAI API error: {e}") from e
-        return json.loads(resp.choices[0].message.content or "{}")
+        parsed = json.loads(resp.choices[0].message.content or "{}")
+        # Convert constraints array → dict for PersonaCreate compatibility.
+        if isinstance(parsed.get("constraints"), list):
+            parsed["constraints"] = {
+                str(item.get("key")): item.get("value")
+                for item in parsed["constraints"]
+                if isinstance(item, dict) and item.get("key")
+            }
+        return parsed
 
     def generate_test_case(
         self,
